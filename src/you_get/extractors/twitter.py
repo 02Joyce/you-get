@@ -41,52 +41,85 @@ def twitter_download(url, output_dir='.', merge=True, info_only=False, **kwargs)
         r1(r'<meta name="twitter:site:id" content="([^"]*)"', html)
     page_title = "{} [{}]".format(screen_name, item_id)
 
-    authorization = 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
+    try:
+        authorization = 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
 
-    ga_url = 'https://api.twitter.com/1.1/guest/activate.json'
-    ga_content = post_content(ga_url, headers={'authorization': authorization})
-    guest_token = json.loads(ga_content)['guest_token']
-
-    api_url = 'https://api.twitter.com/2/timeline/conversation/%s.json?tweet_mode=extended' % item_id
-    api_content = get_content(api_url, headers={'authorization': authorization, 'x-guest-token': guest_token})
-
-    info = json.loads(api_content)
-    if 'extended_entities' in info['globalObjects']['tweets'][item_id]:
-        # if the tweet contains media, download them
-        media = info['globalObjects']['tweets'][item_id]['extended_entities']['media']
-
-    elif info['globalObjects']['tweets'][item_id].get('is_quote_status') == True:
-        # if the tweet does not contain media, but it quotes a tweet
-        # and the quoted tweet contains media, download them
-        item_id = info['globalObjects']['tweets'][item_id]['quoted_status_id_str']
+        # FIXME: 403 with cookies
+        ga_url = 'https://api.twitter.com/1.1/guest/activate.json'
+        ga_content = post_content(ga_url, headers={'authorization': authorization})
+        guest_token = json.loads(ga_content)['guest_token']
 
         api_url = 'https://api.twitter.com/2/timeline/conversation/%s.json?tweet_mode=extended' % item_id
         api_content = get_content(api_url, headers={'authorization': authorization, 'x-guest-token': guest_token})
 
         info = json.loads(api_content)
+        if item_id not in info['globalObjects']['tweets']:
+            # something wrong here
+            log.w('[Failed] ' + info['timeline']['instructions'][0]['addEntries']['entries'][0]['content']['item']['content']['tombstone']['tombstoneInfo']['richText']['text'])
+            assert False
 
-        if 'extended_entities' in info['globalObjects']['tweets'][item_id]:
+        elif 'extended_entities' in info['globalObjects']['tweets'][item_id]:
+            # if the tweet contains media, download them
             media = info['globalObjects']['tweets'][item_id]['extended_entities']['media']
+
+        elif 'entities' in info['globalObjects']['tweets'][item_id]:
+            # if the tweet contains media from another tweet, download it
+            expanded_url = None
+            for j in info['globalObjects']['tweets'][item_id]['entities']['urls']:
+                if re.match(r'^https://twitter.com/.*', j['expanded_url']):
+                    # FIXME: multiple valid expanded_url's?
+                    expanded_url = j['expanded_url']
+            if expanded_url is not None:
+                item_id = r1(r'/status/(\d+)', expanded_url)
+                assert False
+
+        elif info['globalObjects']['tweets'][item_id].get('is_quote_status') == True:
+            # if the tweet does not contain media, but it quotes a tweet
+            # and the quoted tweet contains media, download them
+            item_id = info['globalObjects']['tweets'][item_id]['quoted_status_id_str']
+
+            api_url = 'https://api.twitter.com/2/timeline/conversation/%s.json?tweet_mode=extended' % item_id
+            api_content = get_content(api_url, headers={'authorization': authorization, 'x-guest-token': guest_token})
+
+            info = json.loads(api_content)
+
+            if 'extended_entities' in info['globalObjects']['tweets'][item_id]:
+                media = info['globalObjects']['tweets'][item_id]['extended_entities']['media']
+            else:
+                # quoted tweet has no media
+                return
+
         else:
-            # quoted tweet has no media
+            # no media, no quoted tweet
             return
 
-    else:
-        # no media, no quoted tweet
-        return
+    except:
+        log.w('[Warning] Falling back to deprecated Twitter API. Extraction may be incomplete.')
+
+        authorization = 'Bearer AAAAAAAAAAAAAAAAAAAAAPYXBAAAAAAACLXUNDekMxqa8h%2F40K4moUkGsoc%3DTYfbDKbT3jJPCEVnMYqilB28NHfOPqkca3qaAxGfsyKCs0wRbw'
+
+        # FIXME: 403 with cookies
+        ga_url = 'https://api.twitter.com/1.1/guest/activate.json'
+        ga_content = post_content(ga_url, headers={'authorization': authorization})
+        guest_token = json.loads(ga_content)['guest_token']
+
+        api_url = 'https://api.twitter.com/1.1/statuses/show/%s.json?tweet_mode=extended' % item_id
+        api_content = get_content(api_url, headers={'authorization': authorization, 'x-guest-token': guest_token})
+        info = json.loads(api_content)
+        media = info['extended_entities']['media']
 
     for medium in media:
         if 'video_info' in medium:
-            # FIXME: we're assuming one tweet only contains one video here
             variants = medium['video_info']['variants']
             variants = sorted(variants, key=lambda kv: kv.get('bitrate', 0))
+            title = item_id + '_' + variants[-1]['url'].split('/')[-1].split('?')[0].split('.')[0]
             urls = [ variants[-1]['url'] ]
             size = urls_size(urls)
             mime, ext = variants[-1]['content_type'], 'mp4'
 
-            print_info(site_info, page_title, mime, size)
+            print_info(site_info, title, mime, size)
             if not info_only:
-                download_urls(urls, page_title, ext, size, output_dir, merge=merge)
+                download_urls(urls, title, ext, size, output_dir, merge=merge)
 
         else:
             title = item_id + '_' + medium['media_url_https'].split('.')[-2].split('/')[-1]

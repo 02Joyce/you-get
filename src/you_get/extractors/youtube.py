@@ -76,11 +76,16 @@ class YouTube(VideoExtractor):
         # - https://www.youtube.com/yts/jsbin/player_ias-vfl_RGK2l/en_US/base.js
         # - https://www.youtube.com/yts/jsbin/player-vflRjqq_w/da_DK/base.js
         # - https://www.youtube.com/yts/jsbin/player_ias-vfl-jbnrr/da_DK/base.js
+        # - https://www.youtube.com/s/player/0b643cd1/player_ias.vflset/sv_SE/base.js
+        # - https://www.youtube.com/s/player/50e823fc/player_ias.vflset/sv_SE/base.js
+        # - https://www.youtube.com/s/player/3b5d5649/player_ias.vflset/sv_SE/base.js
+        # - https://www.youtube.com/s/player/dc0c6770/player_ias.vflset/sv_SE/base.js
         def tr_js(code):
             code = re.sub(r'function', r'def', code)
-            code = re.sub(r'(\W)(as|if|in|is|or)\(', r'\1_\2(', code)
+            # add prefix '_sig_' to prevent namespace pollution
+            code = re.sub(r'(\W)([$\w][$\w][$\w]?)\(', r'\1_sig_\2(', code)
             code = re.sub(r'\$', '_dollar', code)
-            code = re.sub(r'\{', r':\n\t', code)
+            code = re.sub(r'\{', r': ', code)
             code = re.sub(r'\}', r'\n', code)
             code = re.sub(r'var\s+', r'', code)
             code = re.sub(r'(\w+).join\(""\)', r'"".join(\1)', code)
@@ -99,7 +104,7 @@ class YouTube(VideoExtractor):
         f1def = match1(js, r'function %s(\(\w+\)\{[^\{]+\})' % re.escape(f1)) or \
                 match1(js, r'\W%s=function(\(\w+\)\{[^\{]+\})' % re.escape(f1))
         f1def = re.sub(r'([$\w]+\.)([$\w]+\(\w+,\d+\))', r'\2', f1def)
-        f1def = 'function main_%s%s' % (f1, f1def)  # prefix to avoid potential namespace conflict
+        f1def = 'function %s%s' % (f1, f1def)
         code = tr_js(f1def)
         f2s = set(re.findall(r'([$\w]+)\(\w+,\d+\)', f1def))
         for f2 in f2s:
@@ -110,15 +115,13 @@ class YouTube(VideoExtractor):
             else:
                 f2def = re.search(r'[^$\w]%s:function\((\w+)\)(\{[^\{\}]+\})' % f2e, js)
                 f2def = 'function {}({},b){}'.format(f2e, f2def.group(1), f2def.group(2))
-            f2 = re.sub(r'(as|if|in|is|or)', r'_\1', f2)
-            f2 = re.sub(r'\$', '_dollar', f2)
-            code = code + 'global %s\n' % f2 + tr_js(f2def)
+            f2 = re.sub(r'\$', '_dollar', f2)  # replace dollar sign
+            code = code + 'global _sig_%s\n' % f2 + tr_js(f2def)
 
-        f1 = re.sub(r'(as|if|in|is|or)', r'_\1', f1)
-        f1 = re.sub(r'\$', '_dollar', f1)
-        code = code + 'sig=main_%s(s)' % f1  # prefix to avoid potential namespace conflict
+        f1 = re.sub(r'\$', '_dollar', f1)  # replace dollar sign
+        code = code + '_sig=_sig_%s(s)' % f1
         exec(code, globals(), locals())
-        return locals()['sig']
+        return locals()['_sig']
 
     def chunk_by_range(url, size):
         urls = []
@@ -138,6 +141,7 @@ class YouTube(VideoExtractor):
         """
         return match1(url, r'youtu\.be/([^?/]+)') or \
           match1(url, r'youtube\.com/embed/([^/?]+)') or \
+          match1(url, r'youtube\.com/shorts/([^/?]+)') or \
           match1(url, r'youtube\.com/v/([^/?]+)') or \
           match1(url, r'youtube\.com/watch/([^/?]+)') or \
           parse_query_param(url, 'v') or \
@@ -195,8 +199,9 @@ class YouTube(VideoExtractor):
         # Get video info
         # 'eurl' is a magic parameter that can bypass age restriction
         # full form: 'eurl=https%3A%2F%2Fyoutube.googleapis.com%2Fv%2F{VIDEO_ID}'
-        video_info = parse.parse_qs(get_content('https://www.youtube.com/get_video_info?video_id={}&eurl=https%3A%2F%2Fy'.format(self.vid)))
-        logging.debug('STATUS: %s' % video_info['status'][0])
+        #video_info = parse.parse_qs(get_content('https://www.youtube.com/get_video_info?video_id={}&eurl=https%3A%2F%2Fy'.format(self.vid)))
+        #logging.debug('STATUS: %s' % video_info['status'][0])
+        video_info = {'status': ['ok'], 'use_cipher_signature': 'True'}
 
         ytplayer_config = None
         if 'status' not in video_info:
@@ -229,7 +234,10 @@ class YouTube(VideoExtractor):
 
                     except:
                         # ytplayer_config = {args:{raw_player_response:ytInitialPlayerResponse}}
-                        ytInitialPlayerResponse = json.loads(re.search('ytInitialPlayerResponse\s*=\s*([^\n]+?});', video_page).group(1))
+                        try:  # FIXME: we should extract ytInitialPlayerResponse more reliably
+                            ytInitialPlayerResponse = json.loads(re.search('ytInitialPlayerResponse\s*=\s*([^\n]+?});</script>', video_page).group(1))
+                        except:
+                            ytInitialPlayerResponse = json.loads(re.search('ytInitialPlayerResponse\s*=\s*([^\n]+?});', video_page).group(1))
 
                         stream_list = ytInitialPlayerResponse['streamingData']['formats']
                         #stream_list = ytInitialPlayerResponse['streamingData']['adaptiveFormats']
@@ -253,11 +261,19 @@ class YouTube(VideoExtractor):
             else:
                 # Parse video page instead
                 video_page = get_content('https://www.youtube.com/watch?v=%s' % self.vid)
-                ytplayer_config = json.loads(re.search('ytplayer.config\s*=\s*([^\n]+?});', video_page).group(1))
 
-                self.title = json.loads(ytplayer_config["args"]["player_response"])["videoDetails"]["title"]
-                self.html5player = 'https://www.youtube.com' + ytplayer_config['assets']['js']
-                stream_list = ytplayer_config['args']['url_encoded_fmt_stream_map'].split(',')
+                try:  # FIXME: we should extract ytInitialPlayerResponse more reliably
+                    ytInitialPlayerResponse = json.loads(re.search('ytInitialPlayerResponse\s*=\s*([^\n]+?});</script>', video_page).group(1))
+                except:
+                    ytInitialPlayerResponse = json.loads(re.search('ytInitialPlayerResponse\s*=\s*([^\n]+?});', video_page).group(1))
+
+                self.title = ytInitialPlayerResponse["videoDetails"]["title"]
+                if re.search('([^"]*/base\.js)"', video_page):
+                    self.html5player = 'https://www.youtube.com' + re.search('([^"]*/base\.js)"', video_page).group(1)
+                else:
+                    self.html5player = None
+
+                stream_list = ytInitialPlayerResponse['streamingData']['formats']
 
         elif video_info['status'] == ['fail']:
             logging.debug('ERRORCODE: %s' % video_info['errorcode'][0])
